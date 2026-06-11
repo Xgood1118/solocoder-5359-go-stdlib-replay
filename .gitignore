@@ -1,0 +1,4 @@
+replay.exe
+result.json
+*.replay
+/tmp/

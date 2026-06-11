@@ -1,0 +1,37 @@
+我们做后端开发经常要调试一些奇葩的接口问题，比如前端说某个请求没成功但后端日志看着请求压根没过来，或者某个接口的某个 header 带了特殊值导致走错了分支。手动复制 curl 太麻烦，干脆搞个工具能把浏览器的请求录下来然后批量回放。
+
+Go 写，标准库为主，如果要 HTTP 客户端直接用 net/http，UI 不用搞，纯命令行就行。整体是单二进制文件，go build 出来一个 replay 二进制。
+
+录制这部分，怎么把请求存下来你自己看着办，可以是 HAR 那种 JSON 格式，也可以自定义一个更紧凑的格式，反正记录里得有 URL、method、headers、query、body、还有时间戳、还有响应的 status、headers、body 也要存。如果用 HAR 就照着 HAR 1.2 spec 来，至少得能解析 Chrome DevTools、Firefox DevTools、Charles 这几个工具导出来的 har 文件，字段命名细微差别要兼容。录制命令是 replay record --input har.json --output session.replay 这种。如果想直接从命令行录制（不导 har），可以 replay capture --listen :8888 --output session.replay 这样启动一个 HTTP 代理端口，浏览器配代理到 8888，访问网站的时候所有流量都自动记录到 session.replay。
+
+回放的时候有几种模式，replay run --session session.replay 这个就是按记录的顺序一个一个请求打出去。replay run --session session.replay --loop 3 这种就是循环 3 遍。replay run --session session.replay --filter /api/users 这种按 URL 子串过滤，只跑匹配的那些。filter 还支持 --method POST 单独按 HTTP 方法过滤。
+
+回放的时候有些值得能换，比如登录接口拿到的 token 要塞到后续请求的 Authorization header 里，这种变量替换的规则你说一下支持哪些，比如 {{token}} 这种占位符从环境变量或者从前面请求的响应里提取。具体提取规则用 jq 那种语法太重了，简单点，支持从响应 body 里用 regex 抓一组，命中的第一个 match 当作变量值就行。命令大概像 replay run --session x.replay --bind token=response:user.token 这样，response 表示从上一次响应里抓，user.token 这种点分路径定位到 JSON 字段。也支持从 header 抓：--bind reqid=response:header.X-Request-Id。变量替换的范围是后续所有请求的 URL、header、body 里的 {{varname}} 占位符都会被替换。
+
+响应对比是个大坑。回放的时候要能跟原始响应做对比，diff 出来哪些 header 变了、body 哪些字段值不一样。命令 replay diff --original session.replay --replayed result.json 这样，输出一个人类能看的 diff 报告。diff 报告里 header 变化是表格形式（header 名、原始值、回放值、是否变化），body 变化是 JSON 字段级别 diff（哪个 key 变了、值从什么变成什么、新增了哪些 key、删除了哪些 key）。如果原始和回放都是 HTML，body 跳过不 diff（HTML 太容易变）。可以加 --ignore-body 强制跳过 body diff 加 --ignore-headers 跳过 header diff。
+
+速度控制要能做，replay run --session x.replay --rps 10 这样限制每秒最多 10 个请求，超过就排队等。并发数 --concurrency 4 这样。rps 和 concurrency 同时设置的时候以 concurrency 上限为准内部用令牌桶限速。
+
+录制的时候如果某个响应特别大可以截断存，--max-body-size 1MB 这种，超过 1MB 的 body 截断成 1MB + 一个 "TRUNCATED" 标记。
+
+时间偏移也支持一下，录制时记录了 timestamp，回放的时候用 --offset 1h 表示把所有请求的时间戳往后挪 1 小时再发（用于测试一些有过期时间校验的接口）。
+
+别用第三方重型库，gorequest 那种都不需要，net/http 加 encoding/json 加 regexp 加 strings 足够了，命令行参数解析用标准库 flag 包。yargs 那种都不要。
+
+整体启动参数要有 --help 写得详细点，每个子命令（record、capture、run、diff）都有自己的 help。错误信息要友好，session 文件读不到给具体路径，加载失败给行号。
+
+子命令还有一些细节要支持。replay run 默认在请求之间不加 sleep（也就是尽量快），可以加 --delay 100ms 这样每两个请求之间强制等 100ms，模拟人工操作。--random-delay 100,500 这样在两个区间随机 sleep（用来打乱请求时序测试后端的顺序敏感性）。
+
+录制（capture 模式）作为代理的时候，可以加 --exclude /api/health,/metrics 这种逗号分隔的 URL 列表跳过不打日志（健康检查这种特别频繁的不要）。可以加 --include-only /api 这种前缀白名单反过来只记录匹配的。
+
+回放结果要写到文件里，默认 ./result.json 用 replay run --output result.json 这样。result.json 里每个请求一条记录，包含 original_request、replayed_request、original_response、replayed_response、status、duration_ms、error 字段。方便后续做 diff 或者聚合分析。
+
+如果回放过程中某个请求失败了（网络错误、解析错误），不要整个停掉，标记这个请求 status 为 failed 继续跑下一个。错误信息详细到足够排查（错误类型、错误消息、可能的原因）。
+
+回放还支持 dry-run 模式，--dry-run 这样不打真实请求只把要发的请求打印出来给用户确认，特别适合生产环境跑之前先看下要打什么。
+
+session 文件格式版本号要写在文件头，类似 {"version": 1, "type": "replay-session", "requests": [...]} 这样，未来格式升级好兼容。
+
+整个项目的目录建议这样组织，cmd/replay/main.go 是入口，internal/session/ 放 session 文件读写，internal/har/ 放 HAR 解析，internal/replay/ 放回放引擎，internal/diff/ 放响应对比，internal/proxy/ 放 capture 模式代理。go mod 名字 example.com/replay。
+
+时间相关字段统一用 RFC3339 格式存储和展示，跨时区不踩坑。HTTP body 二进制内容做 base64 编码存进 JSON，文本内容按 UTF-8 存。
