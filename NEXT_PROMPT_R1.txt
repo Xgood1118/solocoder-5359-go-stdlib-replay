@@ -1,0 +1,1 @@
+R1 4 bug：diff 命令 nil pointer panic；compareBodies 把非 JSON 也 skip（PROMPT 只 HTML+HTML 跳）；CONNECT 模式 HTTPS 不录制；offset 改写时间戳后 .000Z 变 Z。
