@@ -1,1 +1,7 @@
-R1 4 bug：diff 命令 nil pointer panic；compareBodies 把非 JSON 也 skip（PROMPT 只 HTML+HTML 跳）；CONNECT 模式 HTTPS 不录制；offset 改写时间戳后 .000Z 变 Z。
+录制回放主流程通了，但 diff 和 HTTPS 这两条路径有问题：
+
+1) diff 命令遇到空 body 直接空指针崩溃，整个进程挂掉。
+2) 非 JSON 响应被当成"语义相同"直接跳过，diff 完全不显示。
+3) HTTPS 握手阶段没录制到任何东西，回放时是断的。
+4) 时间戳小数位被截掉，精度丢了，时间对比不准确。
+检查修复一下。

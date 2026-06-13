@@ -122,7 +122,20 @@ func NowRFC3339() string {
 }
 
 func ParseTimestamp(ts string) (time.Time, error) {
-	return time.Parse(time.RFC3339Nano, ts)
+	formats := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.000Z07:00",
+		"2006-01-02T15:04:05.000Z",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, ts); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("无法解析时间戳: %s", ts)
 }
 
 func Save(s *Session, path string) error {

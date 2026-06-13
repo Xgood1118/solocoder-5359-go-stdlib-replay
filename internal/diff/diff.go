@@ -80,7 +80,7 @@ func Compare(cfg Config) (*Report, error) {
 		}
 
 		ed := compareEntry(i, origEntry, replayedEntry, cfg)
-		if len(ed.Headers) > 0 || len(ed.Body) > 0 || ed.StatusChanged {
+		if ed.StatusChanged || hasChangedHeaders(ed.Headers) || len(ed.Body) > 0 {
 			report.ChangedEntries++
 		}
 		report.Entries = append(report.Entries, ed)
@@ -94,13 +94,26 @@ func compareEntry(idx int, orig *session.Entry, replayed *ReplayedEntry, cfg Con
 		Index:          idx,
 		URL:            orig.Request.URL,
 		Method:         orig.Request.Method,
-		OriginalStatus: orig.Response.Status,
-		ReplayedStatus: replayed.Response.Status,
-		StatusChanged:  orig.Response.Status != replayed.Response.Status,
 	}
 
+	if orig.Response != nil {
+		ed.OriginalStatus = orig.Response.Status
+	}
+	if replayed.Response != nil {
+		ed.ReplayedStatus = replayed.Response.Status
+	}
+	ed.StatusChanged = ed.OriginalStatus != ed.ReplayedStatus
+
 	if !cfg.IgnoreHeaders {
-		ed.Headers = compareHeaders(orig.Response.Headers, replayed.Response.Headers)
+		origHeaders := map[string]string{}
+		replayedHeaders := map[string]string{}
+		if orig.Response != nil && orig.Response.Headers != nil {
+			origHeaders = orig.Response.Headers
+		}
+		if replayed.Response != nil && replayed.Response.Headers != nil {
+			replayedHeaders = replayed.Response.Headers
+		}
+		ed.Headers = compareHeaders(origHeaders, replayedHeaders)
 	}
 
 	if !cfg.IgnoreBody {
@@ -157,6 +170,15 @@ func compareHeaders(orig, replayed map[string]string) []HeaderDiff {
 	return result
 }
 
+func hasChangedHeaders(headers []HeaderDiff) bool {
+	for _, h := range headers {
+		if h.IsChanged {
+			return true
+		}
+	}
+	return false
+}
+
 func compareBodies(orig, replayed *session.ResponseRecord) ([]BodyFieldDiff, bool, string) {
 	origCT := getContentType(orig)
 	replayedCT := getContentType(replayed)
@@ -165,33 +187,47 @@ func compareBodies(orig, replayed *session.ResponseRecord) ([]BodyFieldDiff, boo
 		return nil, true, "响应均为 HTML，跳过 diff"
 	}
 
-	if orig.Body == nil && replayed.Body == nil {
+	origBody := getBodyContent(orig)
+	replayedBody := getBodyContent(replayed)
+
+	if origBody == "" && replayedBody == "" {
 		return nil, true, "两个响应体均为空"
 	}
 
-	if !isJSON(origCT) || !isJSON(replayedCT) {
-		return nil, true, fmt.Sprintf("非 JSON 响应 (original=%s, replayed=%s)，跳过 diff", origCT, replayedCT)
-	}
-
-	var origJSON, replayedJSON map[string]interface{}
-
-	if orig.Body != nil && !orig.Body.IsBinary {
-		content := orig.Body.Content
-		if orig.Body.Truncated {
-			content = strings.TrimSuffix(content, "\n"+session.TruncatedTag)
+	if origBody != replayedBody {
+		if isJSON(origCT) && isJSON(replayedCT) {
+			return diffJSONBodies(origBody, replayedBody), false, ""
 		}
-		_ = json.Unmarshal([]byte(content), &origJSON)
+		return []BodyFieldDiff{{
+			Path:       "(body)",
+			Original:   truncate(origBody, 200),
+			Replayed:   truncate(replayedBody, 200),
+			ChangeType: "value_changed",
+		}}, false, ""
 	}
 
-	if replayed.Body != nil && !replayed.Body.IsBinary {
-		content := replayed.Body.Content
-		if replayed.Body.Truncated {
-			content = strings.TrimSuffix(content, "\n"+session.TruncatedTag)
-		}
-		_ = json.Unmarshal([]byte(content), &replayedJSON)
-	}
+	return nil, false, ""
+}
 
-	return compareJSONValues("", origJSON, replayedJSON), false, ""
+func getBodyContent(resp *session.ResponseRecord) string {
+	if resp == nil || resp.Body == nil {
+		return ""
+	}
+	content := resp.Body.Content
+	if resp.Body.Truncated {
+		content = strings.TrimSuffix(content, "\n"+session.TruncatedTag)
+	}
+	if resp.Body.IsBinary {
+		return "(binary data, " + fmt.Sprintf("%d bytes base64", len(content)) + ")"
+	}
+	return content
+}
+
+func diffJSONBodies(origContent, replayedContent string) []BodyFieldDiff {
+	var origJSON, replayedJSON interface{}
+	_ = json.Unmarshal([]byte(origContent), &origJSON)
+	_ = json.Unmarshal([]byte(replayedContent), &replayedJSON)
+	return compareJSONValues("", origJSON, replayedJSON)
 }
 
 func compareJSONValues(prefix string, orig, replayed interface{}) []BodyFieldDiff {
@@ -349,7 +385,7 @@ func FormatReport(report *Report) string {
 	sb.WriteString(fmt.Sprintf("有变化记录数: %d\n\n", report.ChangedEntries))
 
 	for _, entry := range report.Entries {
-		if !entry.StatusChanged && len(entry.Headers) == 0 && len(entry.Body) == 0 && !entry.BodySkipped {
+		if !entry.StatusChanged && !hasChangedHeaders(entry.Headers) && len(entry.Body) == 0 && !entry.BodySkipped {
 			continue
 		}
 

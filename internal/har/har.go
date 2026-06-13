@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"net/url"
 	"strings"
+	"time"
 
 	"example.com/replay/internal/session"
 )
@@ -231,11 +232,11 @@ func normalizeTimestamp(ts string) string {
 	normalized := strings.ReplaceAll(ts, "/", "-")
 	if strings.HasSuffix(normalized, "Z") {
 		if t, err := session.ParseTimestamp(normalized); err == nil {
-			return t.Format("2006-01-02T15:04:05.000Z07:00")
+			return t.Format(time.RFC3339Nano)
 		}
 	}
 	if t, err := session.ParseTimestamp(ts); err == nil {
-		return t.Format("2006-01-02T15:04:05.000Z07:00")
+		return t.Format(time.RFC3339Nano)
 	}
 	return session.NowRFC3339()
 }
